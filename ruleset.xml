@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<ruleset name="BIPractice">
+    <description>BI Best Practices - Custom Ruleset</description>
+    <!-- Sensitive Data, Logger & Security - Custom Rules -->
+    <rule ref="BIPractice.Custom.SensitiveData"/>
+</ruleset>

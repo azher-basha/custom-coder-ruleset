@@ -35,6 +35,8 @@ class SensitiveDataSniff implements Sniff {
     '$data',
     '$request',
     '$response',
+    '$api_response',
+    '$api_request',
     
     // PHP superglobals
     '$_POST',
@@ -137,11 +139,12 @@ class SensitiveDataSniff implements Sniff {
    */
   public function register() {
     return [
-      T_STRING,          // Function calls (e.g., watchdog, print_r, logger->info)
-      T_VARIABLE,        // Variable declarations and usage
-      T_ECHO,            // Echo statements
-      T_PRINT,           // Print statements
-      T_RETURN,          // Return statements (API responses)
+      T_STRING,                    // Function calls (e.g., watchdog, print_r, logger->info)
+      T_VARIABLE,                  // Variable declarations and usage
+      T_CONSTANT_ENCAPSED_STRING,  // String literals (for keyword detection)
+      T_ECHO,                      // Echo statements
+      T_PRINT,                     // Print statements
+      T_RETURN,                    // Return statements (API responses)
     ];
   }
 
@@ -164,6 +167,10 @@ class SensitiveDataSniff implements Sniff {
 
       case T_VARIABLE:
         $this->processVariable($phpcsFile, $stackPtr);
+        break;
+
+      case T_CONSTANT_ENCAPSED_STRING:
+        $this->processStringLiteral($phpcsFile, $stackPtr);
         break;
 
       case T_ECHO:
@@ -235,25 +242,127 @@ class SensitiveDataSniff implements Sniff {
     $tokens = $phpcsFile->getTokens();
     $variableName = $tokens[$stackPtr]['content'];
 
-    // Skip if not a sensitive variable
-    if (!$this->isSensitiveVariable($variableName)) {
-      return;
-    }
-
     // Check if this variable is already being reported in a specific context
-    if ($this->isVariableInReportedContext($phpcsFile, $stackPtr)) {
-      return;
+    $inReportedContext = $this->isVariableInReportedContext($phpcsFile, $stackPtr);
+
+    // Check for exact sensitive variable match
+    if ($this->isSensitiveVariable($variableName)) {
+      if (!$inReportedContext) {
+        $phpcsFile->addWarning(
+          sprintf(
+            'Sensitive variable "%s" detected. Ensure proper handling and avoid logging or exposing this data.',
+            $variableName
+          ),
+          $stackPtr,
+          'SensitiveVariableUsage'
+        );
+      }
+      return; // Already reported, no need to check keywords
     }
 
-    // Report standalone sensitive variable usage
-    $phpcsFile->addWarning(
-      sprintf(
-        'Sensitive variable "%s" detected. Ensure proper handling and avoid logging or exposing this data.',
-        $variableName
-      ),
-      $stackPtr,
-      'SensitiveVariableUsage'
-    );
+    // Check for sensitive keyword pattern match (e.g., $password, $user_token, $api_key)
+    if ($this->containsSensitiveKeyword($variableName)) {
+      if (!$inReportedContext) {
+        $phpcsFile->addWarning(
+          sprintf(
+            'Variable "%s" contains sensitive keyword pattern. Ensure proper handling and avoid logging or exposing this data.',
+            $variableName
+          ),
+          $stackPtr,
+          'SensitiveKeywordVariableUsage'
+        );
+      }
+    }
+  }
+
+  /**
+   * Processes string literals to detect sensitive keywords.
+   *
+   * This method checks all string literals (like array keys, configuration keys, etc.)
+   * for sensitive keyword patterns that might indicate sensitive data handling.
+   *
+   * @param File $phpcsFile The file being scanned.
+   * @param int  $stackPtr  The position of the string token.
+   *
+   * @return void
+   */
+  private function processStringLiteral(File $phpcsFile, int $stackPtr) {
+    $tokens = $phpcsFile->getTokens();
+    $content = $tokens[$stackPtr]['content'];
+    
+    // Remove quotes
+    $cleanContent = trim($content, '\'"');
+    
+    // Skip empty strings or very short strings (single characters)
+    if (strlen($cleanContent) < 2) {
+      return;
+    }
+    
+    // Check if this string is in a context that's already being reported
+    if ($this->isStringInReportedContext($phpcsFile, $stackPtr)) {
+      return;
+    }
+    
+    // Check for sensitive keywords in the string
+    foreach ($this->sensitiveKeywords as $keyword) {
+      if (stripos($cleanContent, $keyword) !== false) {
+        $phpcsFile->addWarning(
+          sprintf(
+            'String literal "%s" contains sensitive keyword "%s". This may indicate sensitive data handling.',
+            $cleanContent,
+            $keyword
+          ),
+          $stackPtr,
+          'SensitiveKeywordInString'
+        );
+        return; // Only report once per string
+      }
+    }
+  }
+
+  /**
+   * Checks if a string literal is within a context that's already being reported.
+   *
+   * This prevents duplicate warnings for strings in logger, debug, echo, etc.
+   *
+   * @param File $phpcsFile The file being scanned.
+   * @param int  $stackPtr  The position of the string token.
+   *
+   * @return bool True if in reported context, false otherwise.
+   */
+  private function isStringInReportedContext(File $phpcsFile, int $stackPtr) {
+    $tokens = $phpcsFile->getTokens();
+    $line = $tokens[$stackPtr]['line'];
+    
+    // Look backwards on the same line for function calls or output statements
+    for ($i = $stackPtr - 1; $i >= 0 && $tokens[$i]['line'] === $line; $i--) {
+      $tokenCode = $tokens[$i]['code'];
+      $tokenContent = strtolower($tokens[$i]['content'] ?? '');
+      
+      // Check if we're inside a logger call
+      if ($tokenCode === T_STRING) {
+        $allLoggerMethods = array_merge(
+          $this->loggingMethodsWarning,
+          $this->loggingMethodsError
+        );
+        
+        if (in_array($tokenContent, $allLoggerMethods, true) || $tokenContent === 'watchdog') {
+          return true;
+        }
+        
+        // Check if we're inside a debug function
+        if ($this->isDebugFunction($tokenContent)) {
+          return true;
+        }
+      }
+      
+      // Check if we're in echo, print, or return context
+      if (in_array($tokenCode, [T_ECHO, T_PRINT, T_RETURN], true)) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   /**
@@ -542,6 +651,7 @@ class SensitiveDataSniff implements Sniff {
       if ($token['code'] === T_VARIABLE) {
         $variableName = $token['content'];
         
+        // Check for exact match first
         if ($this->isSensitiveVariable($variableName)) {
           $phpcsFile->addWarning(
             sprintf(
@@ -550,6 +660,17 @@ class SensitiveDataSniff implements Sniff {
             ),
             $i,
             'SensitiveLoggerArgumentVariable'
+          );
+        }
+        // Also check for keyword patterns
+        elseif ($this->containsSensitiveKeyword($variableName)) {
+          $phpcsFile->addWarning(
+            sprintf(
+              'Logger argument may contain sensitive data. Variable with sensitive keyword: "%s"',
+              $variableName
+            ),
+            $i,
+            'SensitiveLoggerArgumentKeyword'
           );
         }
       }
@@ -668,11 +789,22 @@ class SensitiveDataSniff implements Sniff {
     $baseMessage,
     $errorCode
   ) {
+    // Check for exact sensitive variable match
     if ($this->isSensitiveVariable($content)) {
       $phpcsFile->addWarning(
         sprintf('%s Sensitive variable: "%s"', $baseMessage, $content),
         $stackPtr,
         $errorCode . 'Variable'
+      );
+      return;
+    }
+
+    // Check for sensitive keyword pattern
+    if ($this->containsSensitiveKeyword($content)) {
+      $phpcsFile->addWarning(
+        sprintf('%s Variable with sensitive keyword: "%s"', $baseMessage, $content),
+        $stackPtr,
+        $errorCode . 'KeywordVariable'
       );
     }
   }
@@ -736,5 +868,33 @@ class SensitiveDataSniff implements Sniff {
    */
   private function isSensitiveVariable($variableName) {
     return in_array($variableName, $this->sensitiveVariables, true);
+  }
+
+  /**
+   * Checks if a variable name contains any sensitive keyword patterns.
+   *
+   * This method checks if the variable name contains any of the sensitive keywords
+   * defined in $sensitiveKeywords, allowing detection of variables like:
+   * - $password, $user_password, $old_password
+   * - $token, $auth_token, $api_token
+   * - $secret, $client_secret
+   * - $apikey, $api_key
+   *
+   * @param string $variableName The variable name (with $).
+   *
+   * @return bool True if the variable contains a sensitive keyword, false otherwise.
+   */
+  private function containsSensitiveKeyword($variableName) {
+    // Remove the $ prefix for checking
+    $cleanName = strtolower(ltrim($variableName, '$'));
+
+    foreach ($this->sensitiveKeywords as $keyword) {
+      // Check if the keyword appears anywhere in the variable name
+      if (strpos($cleanName, strtolower($keyword)) !== false) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }

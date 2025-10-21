@@ -14,6 +14,9 @@ use PHP_CodeSniffer\Sniffs\Sniff;
  * - Direct output of sensitive information via echo/print
  * - Exposure of sensitive data in API return statements
  * - Declaration and usage of sensitive variables throughout the codebase
+ * - Detection of hardcoded sensitive credentials during initialization.
+ * - **NEW: General detection of any variable or array key initialized with hardcoded values,**
+ *   to ensure developers review for potential hidden credentials.
  *
  * @package BIPractice\Sniffs\Custom
  */
@@ -53,6 +56,41 @@ class SensitiveDataSniff implements Sniff {
     '$token',
     '$auth',
     '$apikey',
+    '$email',
+    '$firstname',
+    '$lastname',
+    '$country',
+    '$first_name',
+    '$last_name',
+    '$company_organization',
+    '$job_title',
+    '$business_purpose',
+    '$required_information',
+    '$license_number',
+    '$identifier',
+    '$identifier_type',
+    '$country_code',
+    '$auth0userid',
+    '$loggedinuserid',
+    '$auth_id',
+    '$api_key',
+    '$webinarId',
+    '$Fname',
+    '$Lname',
+    '$veeva_id',
+    '$custom_questions',
+    '$address_value',
+    '$productName',
+    '$searchTerms',
+    '$opu',
+    '$state_licensed_in',
+    '$address',
+    '$zip_code',
+    '$npi',
+    '$state_license_id',
+    '$latitude',
+    '$longitude',
+    '$botId',
   ];
 
   /**
@@ -98,6 +136,94 @@ class SensitiveDataSniff implements Sniff {
     'card',
     'apikey',
     'auth',
+    'client_id',
+    'client_secret',
+    'access_token',
+    'encryption_key',
+    'Q_FIRSTNAME',
+    'Q_LASTNAME',
+    'Q_PHONE',
+    'Q_MOBILE_PHONE',
+    'Q_EMAIL',
+    'Q_ADDRESS1',
+    'Q_DOB',
+    'EmailAddress',
+    'EmailId',
+    'FirstName',
+    'MiddleName',
+    'LastName',
+    'Phones',
+    'Phone',
+    'PhoneNumber',
+    'BirthDate',
+    'PatientFirstName',
+    'PatientLastName',
+    'PatientAddress1',
+    'PatientBirthDate',
+    'PatientPhoneNumber',
+    'PatientEmailAddress',
+    'OpenDoors',
+    'first_name',
+    'last_name',
+    'address',
+    'apartment',
+    'city',
+    'state',
+    'zipcode',
+    'mobile',
+    'dob',
+    'ID_REQUEST',
+    'Q_CAM_ID',
+    'Q_SOURCE',
+    'CARD_TYPE',
+    'state_id',
+    'info_self',
+    'prescribed_spe',
+    'insurance_type',
+    'copay_enrollment',
+    'bi_solution_patient_navigator_',
+    'best_time_to_contact',
+    'receive_periodic_communications',
+    'share_your_story',
+    'voice_mail',
+    'copay_text_message_consent',
+    'cg_guardian_first_name',
+    'cg_guardian_last_name',
+    'cg_guardian_phone',
+    'alt_contact_permission',
+    'cnsnt_patient_name',
+    'cnsnt_patient_dob',
+    'cnsnt_patient_email',
+    'cnsnt_patient_sign',
+    'cnsnt_date',
+    'patient_hipaa_authorization',
+    'consent_pi_solutions_plus',
+    'PatientGenderCode',
+    'PatientAddress2',
+    'PatientCity',
+    'PatientState',
+    'PatientZipCodeBase',
+    'zipcode_5',
+    'consent_bi',
+    'consent_ni_spevigo',
+    'zip_state_code',
+    'create_marketing_profile_nevada',
+    'share_with_partners',
+    'collect_data_marketing',
+    'boehringer_email_marketing_communications',
+    'create_marketing_profile',
+    'hasBeenDiagnosed',
+    'salutation',
+    'role_position',
+    'health_system',
+    'email_',
+    'phone',
+    'therapeutic_area_priority',
+    'area_of_quadruple_aim',
+    'are_you_a_u_s_licensed_physician',
+    'please_choose_an_identification_preference',
+    'select_article_to_view',
+    'botId',
   ];
 
   /**
@@ -141,7 +267,7 @@ class SensitiveDataSniff implements Sniff {
     return [
       T_STRING,                    // Function calls (e.g., watchdog, print_r, logger->info)
       T_VARIABLE,                  // Variable declarations and usage
-      T_CONSTANT_ENCAPSED_STRING,  // String literals (for keyword detection)
+      T_CONSTANT_ENCAPSED_STRING,  // String literals (for keyword detection, and array keys)
       T_ECHO,                      // Echo statements
       T_PRINT,                     // Print statements
       T_RETURN,                    // Return statements (API responses)
@@ -228,10 +354,7 @@ class SensitiveDataSniff implements Sniff {
   }
 
   /**
-   * Processes variable tokens to detect sensitive variable usage.
-   *
-   * This method checks all variable declarations and usages throughout the code
-   * to identify potential sensitive data handling issues.
+   * Processes variable tokens to detect sensitive variable usage and hardcoded credentials.
    *
    * @param File $phpcsFile The file being scanned.
    * @param int  $stackPtr  The position of the variable token.
@@ -245,41 +368,67 @@ class SensitiveDataSniff implements Sniff {
     // Check if this variable is already being reported in a specific context
     $inReportedContext = $this->isVariableInReportedContext($phpcsFile, $stackPtr);
 
-    // Check for exact sensitive variable match
-    if ($this->isSensitiveVariable($variableName)) {
-      if (!$inReportedContext) {
-        $phpcsFile->addWarning(
-          sprintf(
-            'Sensitive variable "%s" detected. Ensure proper handling and avoid logging or exposing this data.',
-            $variableName
-          ),
-          $stackPtr,
-          'SensitiveVariableUsage'
-        );
-      }
-      return; // Already reported, no need to check keywords
+    $isSensitiveVariableMatch = $this->isSensitiveVariable($variableName);
+    $containsSensitiveKeywordPattern = $this->containsSensitiveKeyword($variableName);
+
+    // Report sensitive variable/keyword usage first (if not in a reported context)
+    if ($isSensitiveVariableMatch && !$inReportedContext) {
+      $phpcsFile->addWarning(
+        sprintf(
+          'Sensitive variable "%s" detected. Ensure proper handling and avoid logging or exposing this data.',
+          $variableName
+        ),
+        $stackPtr,
+        'SensitiveVariableUsage'
+      );
+    } elseif ($containsSensitiveKeywordPattern && !$inReportedContext) {
+      $phpcsFile->addWarning(
+        sprintf(
+          'Variable "%s" contains sensitive keyword pattern. Ensure proper handling and avoid logging or exposing this data.',
+          $variableName
+        ),
+        $stackPtr,
+        'SensitiveKeywordVariableUsage'
+      );
     }
 
-    // Check for sensitive keyword pattern match (e.g., $password, $user_token, $api_key)
-    if ($this->containsSensitiveKeyword($variableName)) {
-      if (!$inReportedContext) {
-        $phpcsFile->addWarning(
-          sprintf(
-            'Variable "%s" contains sensitive keyword pattern. Ensure proper handling and avoid logging or exposing this data.',
-            $variableName
-          ),
-          $stackPtr,
-          'SensitiveKeywordVariableUsage'
-        );
+    // Check for assignment operator after the variable.
+    $next = $phpcsFile->findNext(T_WHITESPACE, $stackPtr + 1, null, true);
+
+    if ($next !== false && $tokens[$next]['code'] === T_EQUAL) {
+      $valuePtr = $phpcsFile->findNext(T_WHITESPACE, $next + 1, null, true);
+      
+      if ($valuePtr !== false) {
+        if ($this->isHardcodedValue($tokens[$valuePtr])) {
+          // If it's a specific sensitive variable/keyword, report as an ERROR (higher severity).
+          if ($isSensitiveVariableMatch || $containsSensitiveKeywordPattern) {
+            $phpcsFile->addWarning(
+              sprintf(
+                'Hardcoded credential detected: Sensitive variable "%s" initialized with a literal value. Use environment variables or a secure configuration system.',
+                $variableName
+              ),
+              $valuePtr,
+              'HardcodedCredentialSensitiveVariable'
+            );
+          } else {
+            // NEW: Broad check for any variable initialized with a hardcoded value.
+            // Use a WARNING level for this broader check.
+            $phpcsFile->addWarning(
+              sprintf(
+                'Variable "%s" is initialized with a hardcoded literal value. Review to ensure it\'s not a credential or sensitive information that should be loaded securely.',
+                $variableName
+              ),
+              $valuePtr,
+              'HardcodedLiteralAssignment'
+            );
+          }
+        }
       }
     }
   }
 
   /**
-   * Processes string literals to detect sensitive keywords.
-   *
-   * This method checks all string literals (like array keys, configuration keys, etc.)
-   * for sensitive keyword patterns that might indicate sensitive data handling.
+   * Processes string literals to detect sensitive keywords and hardcoded credentials in array keys.
    *
    * @param File $phpcsFile The file being scanned.
    * @param int  $stackPtr  The position of the string token.
@@ -303,9 +452,11 @@ class SensitiveDataSniff implements Sniff {
       return;
     }
     
+    $containsSensitiveKeyword = false;
     // Check for sensitive keywords in the string
     foreach ($this->sensitiveKeywords as $keyword) {
       if (stripos($cleanContent, $keyword) !== false) {
+        $containsSensitiveKeyword = true;
         $phpcsFile->addWarning(
           sprintf(
             'String literal "%s" contains sensitive keyword "%s". This may indicate sensitive data handling.',
@@ -315,7 +466,49 @@ class SensitiveDataSniff implements Sniff {
           $stackPtr,
           'SensitiveKeywordInString'
         );
-        return; // Only report once per string
+        // Do not return here, as we might need to check for hardcoded values if it's an array key.
+        break; // Only report once per string for keyword detection
+      }
+    }
+
+    // Check if this string literal is an array key (e.g., `['key'] = 'value'`)
+    $prev = $phpcsFile->findPrevious(T_WHITESPACE, $stackPtr - 1, null, true);
+
+    if ($prev !== false && $tokens[$prev]['code'] === T_OPEN_SQUARE_BRACKET) {
+      $closeBracket = $phpcsFile->findNext(T_WHITESPACE, $stackPtr + 1, null, true);
+      if ($closeBracket !== false && $tokens[$closeBracket]['code'] === T_CLOSE_SQUARE_BRACKET) {
+        $assignmentOp = $phpcsFile->findNext(T_WHITESPACE, $closeBracket + 1, null, true);
+        
+        if ($assignmentOp !== false && $tokens[$assignmentOp]['code'] === T_EQUAL) {
+          $valuePtr = $phpcsFile->findNext(T_WHITESPACE, $assignmentOp + 1, null, true);
+          
+          if ($valuePtr !== false) {
+            if ($this->isHardcodedValue($tokens[$valuePtr])) {
+              // If the array key contains a sensitive keyword, report as an ERROR.
+              if ($containsSensitiveKeyword) {
+                $phpcsFile->addWarning(
+                  sprintf(
+                    'Hardcoded credential detected: Array key "%s" contains a sensitive keyword and is initialized with a literal value. Use environment variables or a secure configuration system.',
+                    $cleanContent
+                  ),
+                  $valuePtr,
+                  'HardcodedCredentialSensitiveArrayKey'
+                );
+              } else {
+                // NEW: Broad check for any array key initialized with a hardcoded value.
+                // Use a WARNING level for this broader check.
+                $phpcsFile->addWarning(
+                  sprintf(
+                    'Array key "%s" is initialized with a hardcoded literal value. Review to ensure it\'s not a credential or sensitive information that should be loaded securely.',
+                    $cleanContent
+                  ),
+                  $valuePtr,
+                  'HardcodedLiteralArrayKey'
+                );
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -896,5 +1089,29 @@ class SensitiveDataSniff implements Sniff {
     }
 
     return false;
+  }
+
+  /**
+   * Checks if a token represents a hardcoded literal value.
+   *
+   * This includes strings, numbers, booleans (true/false), and null.
+   *
+   * @param array $token The token array.
+   *
+   * @return bool
+   */
+  private function isHardcodedValue(array $token) {
+    return in_array(
+      $token['code'],
+      [
+        T_CONSTANT_ENCAPSED_STRING, // 'string', "string"
+        T_LNUMBER,                  // 123
+        T_DNUMBER,                  // 1.23
+        T_TRUE,                     // true
+        T_FALSE,                    // false
+        T_NULL,                     // null
+      ],
+      true
+    );
   }
 }
